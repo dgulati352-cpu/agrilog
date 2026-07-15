@@ -1,0 +1,115 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function to get user profile data
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // Helper function to check if the user is an admin
+    function isAdmin() {
+      return isAuthenticated() && 
+        (getUserData().role == 'ADMIN' || ( 'isAdmin' in getUserData() && getUserData().isAdmin == true ));
+    }
+
+    // Helper function to check if the user is a buyer
+    function isBuyer() {
+      return isAuthenticated() && getUserData().role == 'BUYER';
+    }
+
+    // Helper function to check if the user is a seller
+    function isSeller() {
+      return isAuthenticated() && getUserData().role == 'SELLER';
+    }
+
+    // Users Collection Rules
+    match /users/{userId} {
+      // Authenticated users can read profile details (needed for client company/name lookups)
+      allow read: if isAuthenticated();
+      
+      // Permit creation of profiles
+      // - Admins can create any user profile (e.g. provisioning a seller)
+      // - Users can register their own profile:
+      //   - Standard users can only register as 'BUYER' and cannot assign isAdmin = true
+      //   - Bootstrap rule: allow admin@agrilog.com to register as 'ADMIN'
+      allow create: if isAdmin() || (
+        isAuthenticated() && 
+        request.auth.uid == userId &&
+        (
+          (request.resource.data.role == 'BUYER' && (!('isAdmin' in request.resource.data) || request.resource.data.isAdmin == false)) ||
+          (request.resource.data.role == 'ADMIN' && request.auth.token.email == 'admin@agrilog.com')
+        ) &&
+        request.resource.data.email == request.auth.token.email
+      );
+
+      // Permit updating profiles
+      // - Admins can update any profile
+      // - Users can update their own profile, but cannot escalate/change their role or isAdmin status
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        request.auth.uid == userId &&
+        request.resource.data.role == resource.data.role &&
+        (!('isAdmin' in request.resource.data) || request.resource.data.isAdmin == resource.data.isAdmin)
+      );
+
+      // Only admins can delete profiles
+      allow delete: if isAdmin();
+    }
+
+    // Requirements Collection Rules
+    match /requirements/{reqId} {
+      // Authenticated users (buyers, sellers, admins) can view sourcing requirements
+      allow read: if isAuthenticated();
+      
+      // Creating requirements: Admins or authenticated Buyers owning the requirement
+      allow create: if isAdmin() || (isBuyer() && request.resource.data.buyerUid == request.auth.uid);
+      
+      // Modifying/Deleting: Admins or the Buyer who created the requirement
+      allow update, delete: if isAdmin() || (
+        isBuyer() && 
+        resource.data.buyerUid == request.auth.uid && 
+        request.resource.data.buyerUid == resource.data.buyerUid
+      );
+    }
+
+    // Bids Collection Rules
+    match /bids/{bidId} {
+      // Authenticated users can read bids (Buyers view bids on their requirements, Sellers view their bids)
+      allow read: if isAuthenticated();
+      
+      // Creating bids: Admins or authenticated Sellers placing the bid
+      allow create: if isAdmin() || (isSeller() && request.resource.data.sellerUid == request.auth.uid);
+      
+      // Modifying/Deleting: Admins or the Seller who placed the bid
+      allow update, delete: if isAdmin() || (
+        isSeller() && 
+        resource.data.sellerUid == request.auth.uid && 
+        request.resource.data.sellerUid == resource.data.sellerUid
+      );
+    }
+
+    // Orders Collection Rules
+    match /orders/{orderId} {
+      // Authenticated users can read orders
+      allow read: if isAuthenticated();
+      
+      // Creating orders: Admins or buyers/sellers completing a transaction
+      allow create: if isAdmin() || isBuyer() || isSeller();
+      
+      // Modifying orders: Admins or parties directly involved in the order
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        (resource.data.buyerUid == request.auth.uid || resource.data.sellerUid == request.auth.uid)
+      );
+      
+      // Deleting orders: Admins only
+      allow delete: if isAdmin();
+    }
+  }
+}
